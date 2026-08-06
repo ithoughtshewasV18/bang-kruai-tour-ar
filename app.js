@@ -1,12 +1,12 @@
 import {
   FilesetResolver,
   ImageSegmenter
-} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/+esm";
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/+esm";
 
 const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter_landscape/float16/latest/selfie_segmenter_landscape.tflite";
 const WASM_URL =
-  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm";
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm";
 
 const video = document.querySelector("#cameraVideo");
 const outputCanvas = document.querySelector("#outputCanvas");
@@ -39,16 +39,30 @@ let facingMode = "user";
 let running = false;
 let lastVideoTime = -1;
 let latestPersonMask = null;
-let maskWidth = 0;
-let maskHeight = 0;
 let personSeen = false;
 let savedPhotoUrl = null;
+let busySegmenting = false;
+
+function withTimeout(promise, milliseconds, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(
+        () => reject(new Error(`${label} timed out after ${milliseconds / 1000} seconds.`)),
+        milliseconds
+      )
+    )
+  ]);
+}
+
+function setLoading(message) {
+  loadingMessage.textContent = message;
+}
 
 function resizeCanvases() {
-  const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+  const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
   const width = Math.max(1, Math.round(window.innerWidth * pixelRatio));
   const height = Math.max(1, Math.round(window.innerHeight * pixelRatio));
-
   if (outputCanvas.width !== width || outputCanvas.height !== height) {
     outputCanvas.width = width;
     outputCanvas.height = height;
@@ -57,17 +71,15 @@ function resizeCanvases() {
   }
 }
 
-function coverRect(sourceWidth, sourceHeight, targetWidth, targetHeight) {
-  const sourceRatio = sourceWidth / sourceHeight;
-  const targetRatio = targetWidth / targetHeight;
-
-  if (sourceRatio > targetRatio) {
-    const sw = sourceHeight * targetRatio;
-    return { sx: (sourceWidth - sw) / 2, sy: 0, sw, sh: sourceHeight };
+function coverRect(sw, sh, tw, th) {
+  const sr = sw / sh;
+  const tr = tw / th;
+  if (sr > tr) {
+    const cropW = sh * tr;
+    return { sx: (sw - cropW) / 2, sy: 0, sw: cropW, sh };
   }
-
-  const sh = sourceWidth / targetRatio;
-  return { sx: 0, sy: (sourceHeight - sh) / 2, sw: sourceWidth, sh };
+  const cropH = sw / tr;
+  return { sx: 0, sy: (sh - cropH) / 2, sw, sh: cropH };
 }
 
 function drawBackground(ctx, width, height) {
@@ -76,85 +88,77 @@ function drawBackground(ctx, width, height) {
     ctx.fillRect(0, 0, width, height);
     return;
   }
-
-  const crop = coverRect(
-    backgroundImage.naturalWidth,
-    backgroundImage.naturalHeight,
-    width,
-    height
-  );
-
-  ctx.drawImage(
-    backgroundImage,
-    crop.sx, crop.sy, crop.sw, crop.sh,
-    0, 0, width, height
-  );
+  const c = coverRect(backgroundImage.naturalWidth, backgroundImage.naturalHeight, width, height);
+  ctx.drawImage(backgroundImage, c.sx, c.sy, c.sw, c.sh, 0, 0, width, height);
 }
 
 function updateMask(mask) {
-  const data = mask.getAsFloat32Array
-    ? mask.getAsFloat32Array()
-    : mask.getAsUint8Array();
-
-  maskWidth = mask.width;
-  maskHeight = mask.height;
-
-  if (maskCanvas.width !== maskWidth || maskCanvas.height !== maskHeight) {
-    maskCanvas.width = maskWidth;
-    maskCanvas.height = maskHeight;
+  const data = mask.getAsFloat32Array ? mask.getAsFloat32Array() : mask.getAsUint8Array();
+  const width = mask.width;
+  const height = mask.height;
+  if (maskCanvas.width !== width || maskCanvas.height !== height) {
+    maskCanvas.width = width;
+    maskCanvas.height = height;
   }
-
-  const imageData = maskCtx.createImageData(maskWidth, maskHeight);
+  const imageData = maskCtx.createImageData(width, height);
   let visiblePixels = 0;
-
   for (let i = 0; i < data.length; i++) {
-    // Confidence masks are 0..1. Category masks are 0 or 1.
     const raw = data[i];
     const confidence = raw > 1 ? raw / 255 : raw;
-    const softened = Math.max(0, Math.min(1, (confidence - 0.18) / 0.65));
+    const softened = Math.max(0, Math.min(1, (confidence - 0.18) / 0.62));
     const alpha = Math.round(softened * 255);
-
     imageData.data[i * 4] = 255;
     imageData.data[i * 4 + 1] = 255;
     imageData.data[i * 4 + 2] = 255;
     imageData.data[i * 4 + 3] = alpha;
-
     if (confidence > 0.55) visiblePixels++;
   }
-
   maskCtx.putImageData(imageData, 0, 0);
   latestPersonMask = maskCanvas;
   personSeen = visiblePixels > data.length * 0.025;
 }
 
 async function createSegmenter() {
-  const vision = await FilesetResolver.forVisionTasks(WASM_URL);
-
-  return ImageSegmenter.createFromOptions(vision, {
-    baseOptions: {
-      modelAssetPath: MODEL_URL,
-      delegate: "GPU"
-    },
-    runningMode: "VIDEO",
-    outputConfidenceMasks: true,
-    outputCategoryMask: false
-  });
+  setLoading("Downloading the AI camera engine…");
+  const vision = await withTimeout(
+    FilesetResolver.forVisionTasks(WASM_URL),
+    30000,
+    "MediaPipe engine"
+  );
+  setLoading("Loading the person cutout model…");
+  return withTimeout(
+    ImageSegmenter.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: MODEL_URL,
+        delegate: "CPU"
+      },
+      runningMode: "VIDEO",
+      outputConfidenceMasks: true,
+      outputCategoryMask: false
+    }),
+    45000,
+    "Person segmentation model"
+  );
 }
 
 async function openCamera() {
-  if (stream) {
-    stream.getTracks().forEach(track => track.stop());
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error("This browser does not support camera access.");
   }
-
-  stream = await navigator.mediaDevices.getUserMedia({
-    audio: false,
-    video: {
-      facingMode: { ideal: facingMode },
-      width: { ideal: 1280 },
-      height: { ideal: 720 }
-    }
-  });
-
+  if (stream) stream.getTracks().forEach(track => track.stop());
+  setLoading("Opening your camera…");
+  stream = await withTimeout(
+    navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: facingMode },
+        width: { ideal: 960 },
+        height: { ideal: 540 }
+      }
+    }),
+    20000,
+    "Camera permission"
+  );
   video.srcObject = stream;
   await video.play();
 }
@@ -162,126 +166,111 @@ async function openCamera() {
 async function startExperience() {
   startButton.disabled = true;
   startButton.textContent = "Loading…";
-  loadingMessage.textContent = "Loading the person-segmentation model and opening your camera.";
-
+  setLoading("Preparing Wat Chalo AR Photo…");
   try {
-    await Promise.all([
-      backgroundImage.decode().catch(() => undefined),
-      (async () => {
-        segmenter = await createSegmenter();
-      })()
-    ]);
-
     await openCamera();
-
+    await withTimeout(backgroundImage.decode().catch(() => undefined), 10000, "Wat Chalo background");
+    segmenter = await createSegmenter();
     running = true;
     startScreen.classList.add("hidden");
     topBar.classList.remove("hidden");
     controls.classList.remove("hidden");
+    resizeCanvases();
     requestAnimationFrame(renderLoop);
   } catch (error) {
-    console.error(error);
+    console.error("AR startup failed:", error);
+    stream?.getTracks().forEach(track => track.stop());
+    stream = null;
     startButton.disabled = false;
     startButton.textContent = "Try Again";
-    loadingMessage.textContent =
-      "Camera could not start. Use the HTTPS GitHub Pages address and allow camera access.";
+    setLoading(`Could not start: ${error.message}`);
   }
 }
 
-function drawMirroredVideoWithMask() {
+function drawPerson() {
   const width = personCanvas.width;
   const height = personCanvas.height;
-  const crop = coverRect(video.videoWidth, video.videoHeight, width, height);
+  const c = coverRect(video.videoWidth, video.videoHeight, width, height);
   const mirror = facingMode === "user";
 
   personCtx.clearRect(0, 0, width, height);
   personCtx.save();
-
   if (mirror) {
     personCtx.translate(width, 0);
     personCtx.scale(-1, 1);
   }
-
-  personCtx.drawImage(
-    video,
-    crop.sx, crop.sy, crop.sw, crop.sh,
-    0, 0, width, height
-  );
+  personCtx.drawImage(video, c.sx, c.sy, c.sw, c.sh, 0, 0, width, height);
   personCtx.restore();
 
-  if (!latestPersonMask) return;
+  if (!latestPersonMask) {
+    personCtx.clearRect(0, 0, width, height);
+    return;
+  }
 
   personCtx.globalCompositeOperation = "destination-in";
   personCtx.save();
-
   if (mirror) {
     personCtx.translate(width, 0);
     personCtx.scale(-1, 1);
   }
-
-  personCtx.imageSmoothingEnabled = true;
   personCtx.drawImage(latestPersonMask, 0, 0, width, height);
   personCtx.restore();
   personCtx.globalCompositeOperation = "source-over";
 }
 
-function compositeFrame() {
-  const width = outputCanvas.width;
-  const height = outputCanvas.height;
+function processFrame() {
+  if (
+    !segmenter ||
+    busySegmenting ||
+    video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+    video.currentTime === lastVideoTime
+  ) return;
 
-  drawBackground(outputCtx, width, height);
-  drawMirroredVideoWithMask();
-  outputCtx.drawImage(personCanvas, 0, 0);
+  busySegmenting = true;
+  lastVideoTime = video.currentTime;
 
-  // Gentle foreground shade for better blending.
-  const gradient = outputCtx.createLinearGradient(0, height * 0.6, 0, height);
-  gradient.addColorStop(0, "rgba(0,0,0,0)");
-  gradient.addColorStop(1, "rgba(0,0,0,0.08)");
-  outputCtx.fillStyle = gradient;
-  outputCtx.fillRect(0, 0, width, height);
+  try {
+    segmenter.segmentForVideo(video, performance.now(), (result) => {
+      try {
+        const masks = result.confidenceMasks || [];
+        const personMask = masks[1] || masks[0];
+        if (personMask) updateMask(personMask);
+        masks.forEach(mask => {
+          if (mask !== personMask && mask.close) mask.close();
+        });
+      } finally {
+        busySegmenting = false;
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    busySegmenting = false;
+  }
 }
 
 function renderLoop() {
   if (!running) return;
-
   resizeCanvases();
-
-  if (
-    segmenter &&
-    video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
-    video.currentTime !== lastVideoTime
-  ) {
-    lastVideoTime = video.currentTime;
-
-    try {
-      const result = segmenter.segmentForVideo(video, performance.now());
-      const personMask = result.confidenceMasks?.[1] || result.confidenceMasks?.[0];
-
-      if (personMask) updateMask(personMask);
-
-      result.confidenceMasks?.forEach(mask => {
-        if (mask !== personMask && mask.close) mask.close();
-      });
-    } catch (error) {
-      console.error("Segmentation frame failed:", error);
-    }
-  }
-
-  compositeFrame();
-  statusText.textContent = personSeen ? "Ready for your photo" : "Step into the camera view";
+  processFrame();
+  drawBackground(outputCtx, outputCanvas.width, outputCanvas.height);
+  drawPerson();
+  outputCtx.drawImage(personCanvas, 0, 0);
+  statusText.textContent = latestPersonMask
+    ? (personSeen ? "Ready for your photo" : "Step into the camera view")
+    : "Starting person detection…";
   requestAnimationFrame(renderLoop);
 }
 
 async function switchCamera() {
   switchCameraButton.disabled = true;
+  const oldMode = facingMode;
   facingMode = facingMode === "user" ? "environment" : "user";
-
   try {
     await openCamera();
     lastVideoTime = -1;
-  } catch (error) {
-    console.error(error);
-    facingMode = facingMode === "user" ? "environment" : "user";
+    latestPersonMask = null;
+  } catch {
+    facingMode = oldMode;
     await openCamera();
   } finally {
     switchCameraButton.disabled = false;
@@ -289,11 +278,8 @@ async function switchCamera() {
 }
 
 function capturePhoto() {
-  if (!outputCanvas.width || !outputCanvas.height) return;
-
   outputCanvas.toBlob(blob => {
     if (!blob) return;
-
     if (savedPhotoUrl) URL.revokeObjectURL(savedPhotoUrl);
     savedPhotoUrl = URL.createObjectURL(blob);
     photoPreview.src = savedPhotoUrl;
@@ -303,7 +289,6 @@ function capturePhoto() {
 
 function savePhoto() {
   if (!savedPhotoUrl) return;
-
   const link = document.createElement("a");
   link.href = savedPhotoUrl;
   link.download = `wat-chalo-ar-${Date.now()}.jpg`;
