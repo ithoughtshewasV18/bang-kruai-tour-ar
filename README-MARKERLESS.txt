@@ -47,3 +47,4 @@ After the Pages workflow turns green, open:
 - The circular-arrow button changes cameras.
 - Strong, even lighting improves the person's cutout.
 - Chrome on Android is recommended. Safari on iPhone should also be tested before the exhibit.
+
