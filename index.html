@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <meta name="theme-color" content="#2f2118">
+  <title>Bang Kruai Tour AR</title>
+  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div id="loading" class="screen">
+    <div class="panel">
+      <h1>Bang Kruai Tour AR</h1>
+      <p>Allow camera access, then point your phone at the postcard.</p>
+      <button id="startButton">Start AR Camera</button>
+      <p class="small">The included demo recognizes <b>assets/demo-marker.png</b>.</p>
+    </div>
+  </div>
+
+  <div id="scanHint" class="hint hidden">Point the camera at the postcard</div>
+  <button id="captureButton" class="capture hidden" aria-label="Take AR photo"><span></span></button>
+
+  <div id="photoModal" class="modal hidden">
+    <div class="modal-card">
+      <img id="photoPreview" alt="Captured AR photograph">
+      <div class="modal-actions">
+        <button id="downloadButton">Save Photo</button>
+        <button id="closeButton" class="secondary">Retake</button>
+      </div>
+    </div>
+  </div>
+
+  <a-scene id="arScene"
+    mindar-image="imageTargetSrc: https://cdn.jsdelivr.net/gh/hiukim/mind-ar-js@1.2.5/examples/image-tracking/assets/card-example/card.mind; autoStart: false; filterMinCF: 0.001; filterBeta: 10;"
+    color-space="sRGB"
+    renderer="colorManagement: true; physicallyCorrectLights: true; alpha: true; preserveDrawingBuffer: true;"
+    vr-mode-ui="enabled: false"
+    device-orientation-permission-ui="enabled: false"
+    loading-screen="enabled: false"
+    embedded>
+
+    <a-assets timeout="10000">
+      <img id="overlayImage" src="./assets/ar-overlay.png" crossorigin="anonymous">
+    </a-assets>
+
+    <a-camera position="0 0 0" look-controls="enabled: false"></a-camera>
+
+    <a-entity id="target" mindar-image-target="targetIndex: 0">
+      <a-plane src="#overlayImage"
+        position="0 0 0.05"
+        width="1.15"
+        height="0.86"
+        material="transparent: true; alphaTest: 0.01; shader: flat;">
+      </a-plane>
+    </a-entity>
+  </a-scene>
+
+  <canvas id="captureCanvas" class="hidden"></canvas>
+  <script src="./app.js"></script>
+</body>
+</html>

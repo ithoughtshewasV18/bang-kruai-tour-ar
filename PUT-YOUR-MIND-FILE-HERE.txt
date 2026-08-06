@@ -1,0 +1,1 @@
+Place your compiled wat-chalo.mind file in this folder.

@@ -1,0 +1,17 @@
+QUICK CHECKLIST
+
+1. Upload this folder to GitHub.
+2. Enable GitHub Pages: main / root.
+3. Open the HTTPS page on your phone.
+4. Tap Start AR Camera.
+5. Show assets/demo-marker.png on another screen.
+6. Point the phone at it.
+7. Tap the white shutter button.
+8. Save the AR photo.
+
+CUSTOMIZE:
+9. Compile the full Wat Chalo postcard with the official MindAR compiler.
+10. Save the result as targets/wat-chalo.mind.
+11. Replace assets/ar-overlay.png with your transparent Wat Chalo PNG.
+12. Change imageTargetSrc in index.html to ./targets/wat-chalo.mind.
+13. Link the GitHub Pages URL to your Google Sites camera icon.
