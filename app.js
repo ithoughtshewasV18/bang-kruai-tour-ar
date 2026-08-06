@@ -3,7 +3,9 @@ import {
   ImageSegmenter
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/+esm";
 
-const MODEL_URL =
+const SQUARE_MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
+const LANDSCAPE_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter_landscape/float16/latest/selfie_segmenter_landscape.tflite";
 const WASM_URL =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm";
@@ -41,6 +43,11 @@ let latestPersonMask = null;
 let personSeen = false;
 let savedPhotoUrl = null;
 let busySegmenting = false;
+
+function isPortraitDevice() {
+  return window.matchMedia("(orientation: portrait)").matches ||
+    window.innerHeight > window.innerWidth;
+}
 
 function withTimeout(promise, milliseconds, label) {
   return Promise.race([
@@ -125,8 +132,8 @@ function updateMask(mask) {
     const raw = data[i];
     const confidence = raw > 1 ? raw / 255 : raw;
 
-    // Lower threshold keeps hair, ears, and shoulder edges.
-    const feathered = Math.max(0, Math.min(1, (confidence - 0.08) / 0.56));
+    // Preserve fine hair and ear edges without making the background too noisy.
+    const feathered = Math.max(0, Math.min(1, (confidence - 0.06) / 0.52));
     const alpha = Math.round(feathered * 255);
 
     imageData.data[i * 4] = 255;
@@ -134,7 +141,7 @@ function updateMask(mask) {
     imageData.data[i * 4 + 2] = 255;
     imageData.data[i * 4 + 3] = alpha;
 
-    if (confidence > 0.45) visiblePixels++;
+    if (confidence > 0.42) visiblePixels++;
   }
 
   maskCtx.putImageData(imageData, 0, 0);
@@ -143,19 +150,25 @@ function updateMask(mask) {
 }
 
 async function createSegmenter() {
-  setLoading("Downloading the AI camera engine…");
+  const useSquareModel = isPortraitDevice();
+  const modelUrl = useSquareModel ? SQUARE_MODEL_URL : LANDSCAPE_MODEL_URL;
+
+  setLoading(
+    useSquareModel
+      ? "Loading the portrait selfie model…"
+      : "Loading the landscape selfie model…"
+  );
+
   const vision = await withTimeout(
     FilesetResolver.forVisionTasks(WASM_URL),
     30000,
     "MediaPipe engine"
   );
 
-  setLoading("Loading the person cutout model…");
-
   return withTimeout(
     ImageSegmenter.createFromOptions(vision, {
       baseOptions: {
-        modelAssetPath: MODEL_URL,
+        modelAssetPath: modelUrl,
         delegate: "CPU"
       },
       runningMode: "VIDEO",
@@ -172,19 +185,20 @@ async function openCamera() {
     throw new Error("This browser does not support camera access.");
   }
 
-  if (stream) {
-    stream.getTracks().forEach(track => track.stop());
-  }
+  if (stream) stream.getTracks().forEach(track => track.stop());
 
   setLoading("Opening your camera…");
+
+  const portrait = isPortraitDevice();
 
   stream = await withTimeout(
     navigator.mediaDevices.getUserMedia({
       audio: false,
       video: {
         facingMode: { ideal: facingMode },
-        width: { ideal: 960 },
-        height: { ideal: 540 }
+        width: { ideal: portrait ? 720 : 960 },
+        height: { ideal: portrait ? 1280 : 540 },
+        aspectRatio: { ideal: portrait ? 9 / 16 : 16 / 9 }
       }
     }),
     20000,
@@ -202,11 +216,13 @@ async function startExperience() {
 
   try {
     await openCamera();
+
     await withTimeout(
       backgroundImage.decode().catch(() => undefined),
       10000,
       "Wat Chalo background"
     );
+
     segmenter = await createSegmenter();
 
     running = true;
@@ -265,7 +281,6 @@ function drawPerson() {
     return;
   }
 
-  // Critical fix: crop the mask using the same normalized crop as the camera.
   const normX = videoCrop.sx / video.videoWidth;
   const normY = videoCrop.sy / video.videoHeight;
   const normW = videoCrop.sw / video.videoWidth;
@@ -285,7 +300,7 @@ function drawPerson() {
   }
 
   personCtx.imageSmoothingEnabled = true;
-  personCtx.filter = "blur(1.2px)";
+  personCtx.filter = "blur(1px)";
   personCtx.drawImage(
     latestPersonMask,
     maskSX,
