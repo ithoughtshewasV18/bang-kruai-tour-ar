@@ -14,7 +14,7 @@ const outputCtx = outputCanvas.getContext("2d", { alpha: false });
 const personCanvas = document.querySelector("#personCanvas");
 const personCtx = personCanvas.getContext("2d");
 const maskCanvas = document.querySelector("#maskCanvas");
-const maskCtx = maskCanvas.getContext("2d");
+const maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true });
 
 const startScreen = document.querySelector("#startScreen");
 const startButton = document.querySelector("#startButton");
@@ -24,7 +24,6 @@ const controls = document.querySelector("#controls");
 const switchCameraButton = document.querySelector("#switchCameraButton");
 const captureButton = document.querySelector("#captureButton");
 const statusText = document.querySelector("#statusText");
-
 const modal = document.querySelector("#photoModal");
 const photoPreview = document.querySelector("#photoPreview");
 const saveButton = document.querySelector("#saveButton");
@@ -63,6 +62,7 @@ function resizeCanvases() {
   const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
   const width = Math.max(1, Math.round(window.innerWidth * pixelRatio));
   const height = Math.max(1, Math.round(window.innerHeight * pixelRatio));
+
   if (outputCanvas.width !== width || outputCanvas.height !== height) {
     outputCanvas.width = width;
     outputCanvas.height = height;
@@ -71,15 +71,17 @@ function resizeCanvases() {
   }
 }
 
-function coverRect(sw, sh, tw, th) {
-  const sr = sw / sh;
-  const tr = tw / th;
-  if (sr > tr) {
-    const cropW = sh * tr;
-    return { sx: (sw - cropW) / 2, sy: 0, sw: cropW, sh };
+function coverRect(sourceWidth, sourceHeight, targetWidth, targetHeight) {
+  const sourceRatio = sourceWidth / sourceHeight;
+  const targetRatio = targetWidth / targetHeight;
+
+  if (sourceRatio > targetRatio) {
+    const sw = sourceHeight * targetRatio;
+    return { sx: (sourceWidth - sw) / 2, sy: 0, sw, sh: sourceHeight };
   }
-  const cropH = sw / tr;
-  return { sx: 0, sy: (sh - cropH) / 2, sw, sh: cropH };
+
+  const sh = sourceWidth / targetRatio;
+  return { sx: 0, sy: (sourceHeight - sh) / 2, sw: sourceWidth, sh };
 }
 
 function drawBackground(ctx, width, height) {
@@ -88,34 +90,56 @@ function drawBackground(ctx, width, height) {
     ctx.fillRect(0, 0, width, height);
     return;
   }
-  const c = coverRect(backgroundImage.naturalWidth, backgroundImage.naturalHeight, width, height);
-  ctx.drawImage(backgroundImage, c.sx, c.sy, c.sw, c.sh, 0, 0, width, height);
+
+  const crop = coverRect(
+    backgroundImage.naturalWidth,
+    backgroundImage.naturalHeight,
+    width,
+    height
+  );
+
+  ctx.drawImage(
+    backgroundImage,
+    crop.sx, crop.sy, crop.sw, crop.sh,
+    0, 0, width, height
+  );
 }
 
 function updateMask(mask) {
-  const data = mask.getAsFloat32Array ? mask.getAsFloat32Array() : mask.getAsUint8Array();
+  const data = mask.getAsFloat32Array
+    ? mask.getAsFloat32Array()
+    : mask.getAsUint8Array();
+
   const width = mask.width;
   const height = mask.height;
+
   if (maskCanvas.width !== width || maskCanvas.height !== height) {
     maskCanvas.width = width;
     maskCanvas.height = height;
   }
+
   const imageData = maskCtx.createImageData(width, height);
   let visiblePixels = 0;
+
   for (let i = 0; i < data.length; i++) {
     const raw = data[i];
     const confidence = raw > 1 ? raw / 255 : raw;
-    const softened = Math.max(0, Math.min(1, (confidence - 0.18) / 0.62));
-    const alpha = Math.round(softened * 255);
+
+    // Lower threshold keeps hair, ears, and shoulder edges.
+    const feathered = Math.max(0, Math.min(1, (confidence - 0.08) / 0.56));
+    const alpha = Math.round(feathered * 255);
+
     imageData.data[i * 4] = 255;
     imageData.data[i * 4 + 1] = 255;
     imageData.data[i * 4 + 2] = 255;
     imageData.data[i * 4 + 3] = alpha;
-    if (confidence > 0.55) visiblePixels++;
+
+    if (confidence > 0.45) visiblePixels++;
   }
+
   maskCtx.putImageData(imageData, 0, 0);
   latestPersonMask = maskCanvas;
-  personSeen = visiblePixels > data.length * 0.025;
+  personSeen = visiblePixels > data.length * 0.02;
 }
 
 async function createSegmenter() {
@@ -125,7 +149,9 @@ async function createSegmenter() {
     30000,
     "MediaPipe engine"
   );
+
   setLoading("Loading the person cutout model…");
+
   return withTimeout(
     ImageSegmenter.createFromOptions(vision, {
       baseOptions: {
@@ -145,8 +171,13 @@ async function openCamera() {
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new Error("This browser does not support camera access.");
   }
-  if (stream) stream.getTracks().forEach(track => track.stop());
+
+  if (stream) {
+    stream.getTracks().forEach(track => track.stop());
+  }
+
   setLoading("Opening your camera…");
+
   stream = await withTimeout(
     navigator.mediaDevices.getUserMedia({
       audio: false,
@@ -159,6 +190,7 @@ async function openCamera() {
     20000,
     "Camera permission"
   );
+
   video.srcObject = stream;
   await video.play();
 }
@@ -167,10 +199,16 @@ async function startExperience() {
   startButton.disabled = true;
   startButton.textContent = "Loading…";
   setLoading("Preparing Wat Chalo AR Photo…");
+
   try {
     await openCamera();
-    await withTimeout(backgroundImage.decode().catch(() => undefined), 10000, "Wat Chalo background");
+    await withTimeout(
+      backgroundImage.decode().catch(() => undefined),
+      10000,
+      "Wat Chalo background"
+    );
     segmenter = await createSegmenter();
+
     running = true;
     startScreen.classList.add("hidden");
     topBar.classList.remove("hidden");
@@ -190,16 +228,36 @@ async function startExperience() {
 function drawPerson() {
   const width = personCanvas.width;
   const height = personCanvas.height;
-  const c = coverRect(video.videoWidth, video.videoHeight, width, height);
+
+  const videoCrop = coverRect(
+    video.videoWidth,
+    video.videoHeight,
+    width,
+    height
+  );
+
   const mirror = facingMode === "user";
 
   personCtx.clearRect(0, 0, width, height);
   personCtx.save();
+
   if (mirror) {
     personCtx.translate(width, 0);
     personCtx.scale(-1, 1);
   }
-  personCtx.drawImage(video, c.sx, c.sy, c.sw, c.sh, 0, 0, width, height);
+
+  personCtx.drawImage(
+    video,
+    videoCrop.sx,
+    videoCrop.sy,
+    videoCrop.sw,
+    videoCrop.sh,
+    0,
+    0,
+    width,
+    height
+  );
+
   personCtx.restore();
 
   if (!latestPersonMask) {
@@ -207,13 +265,39 @@ function drawPerson() {
     return;
   }
 
+  // Critical fix: crop the mask using the same normalized crop as the camera.
+  const normX = videoCrop.sx / video.videoWidth;
+  const normY = videoCrop.sy / video.videoHeight;
+  const normW = videoCrop.sw / video.videoWidth;
+  const normH = videoCrop.sh / video.videoHeight;
+
+  const maskSX = normX * latestPersonMask.width;
+  const maskSY = normY * latestPersonMask.height;
+  const maskSW = normW * latestPersonMask.width;
+  const maskSH = normH * latestPersonMask.height;
+
   personCtx.globalCompositeOperation = "destination-in";
   personCtx.save();
+
   if (mirror) {
     personCtx.translate(width, 0);
     personCtx.scale(-1, 1);
   }
-  personCtx.drawImage(latestPersonMask, 0, 0, width, height);
+
+  personCtx.imageSmoothingEnabled = true;
+  personCtx.filter = "blur(1.2px)";
+  personCtx.drawImage(
+    latestPersonMask,
+    maskSX,
+    maskSY,
+    maskSW,
+    maskSH,
+    0,
+    0,
+    width,
+    height
+  );
+  personCtx.filter = "none";
   personCtx.restore();
   personCtx.globalCompositeOperation = "source-over";
 }
@@ -234,7 +318,9 @@ function processFrame() {
       try {
         const masks = result.confidenceMasks || [];
         const personMask = masks[1] || masks[0];
+
         if (personMask) updateMask(personMask);
+
         masks.forEach(mask => {
           if (mask !== personMask && mask.close) mask.close();
         });
@@ -243,21 +329,25 @@ function processFrame() {
       }
     });
   } catch (error) {
-    console.error(error);
+    console.error("Segmentation frame failed:", error);
     busySegmenting = false;
   }
 }
 
 function renderLoop() {
   if (!running) return;
+
   resizeCanvases();
   processFrame();
+
   drawBackground(outputCtx, outputCanvas.width, outputCanvas.height);
   drawPerson();
   outputCtx.drawImage(personCanvas, 0, 0);
+
   statusText.textContent = latestPersonMask
     ? (personSeen ? "Ready for your photo" : "Step into the camera view")
     : "Starting person detection…";
+
   requestAnimationFrame(renderLoop);
 }
 
@@ -265,6 +355,7 @@ async function switchCamera() {
   switchCameraButton.disabled = true;
   const oldMode = facingMode;
   facingMode = facingMode === "user" ? "environment" : "user";
+
   try {
     await openCamera();
     lastVideoTime = -1;
@@ -280,6 +371,7 @@ async function switchCamera() {
 function capturePhoto() {
   outputCanvas.toBlob(blob => {
     if (!blob) return;
+
     if (savedPhotoUrl) URL.revokeObjectURL(savedPhotoUrl);
     savedPhotoUrl = URL.createObjectURL(blob);
     photoPreview.src = savedPhotoUrl;
@@ -289,6 +381,7 @@ function capturePhoto() {
 
 function savePhoto() {
   if (!savedPhotoUrl) return;
+
   const link = document.createElement("a");
   link.href = savedPhotoUrl;
   link.download = `wat-chalo-ar-${Date.now()}.jpg`;
