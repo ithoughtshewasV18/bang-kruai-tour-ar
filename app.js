@@ -3,7 +3,7 @@ import {
   ImageSegmenter
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/+esm";
 
-const SQUARE_MODEL_URL =
+const PORTRAIT_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
 const LANDSCAPE_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter_landscape/float16/latest/selfie_segmenter_landscape.tflite";
@@ -44,9 +44,8 @@ let personSeen = false;
 let savedPhotoUrl = null;
 let busySegmenting = false;
 
-function isPortraitDevice() {
-  return window.matchMedia("(orientation: portrait)").matches ||
-    window.innerHeight > window.innerWidth;
+function isPortrait() {
+  return window.innerHeight > window.innerWidth;
 }
 
 function withTimeout(promise, milliseconds, label) {
@@ -78,17 +77,30 @@ function resizeCanvases() {
   }
 }
 
-function coverRect(sourceWidth, sourceHeight, targetWidth, targetHeight) {
-  const sourceRatio = sourceWidth / sourceHeight;
-  const targetRatio = targetWidth / targetHeight;
+function coverRect(sw, sh, tw, th) {
+  const sr = sw / sh;
+  const tr = tw / th;
 
-  if (sourceRatio > targetRatio) {
-    const sw = sourceHeight * targetRatio;
-    return { sx: (sourceWidth - sw) / 2, sy: 0, sw, sh: sourceHeight };
+  if (sr > tr) {
+    const cropW = sh * tr;
+    return { sx: (sw - cropW) / 2, sy: 0, sw: cropW, sh };
   }
 
-  const sh = sourceWidth / targetRatio;
-  return { sx: 0, sy: (sourceHeight - sh) / 2, sw: sourceWidth, sh };
+  const cropH = sw / tr;
+  return { sx: 0, sy: (sh - cropH) / 2, sw, sh: cropH };
+}
+
+function containRect(sw, sh, tw, th, scale = 1) {
+  const ratio = Math.min(tw / sw, th / sh) * scale;
+  const width = sw * ratio;
+  const height = sh * ratio;
+
+  return {
+    dx: (tw - width) / 2,
+    dy: (th - height) / 2,
+    dw: width,
+    dh: height
+  };
 }
 
 function drawBackground(ctx, width, height) {
@@ -132,8 +144,8 @@ function updateMask(mask) {
     const raw = data[i];
     const confidence = raw > 1 ? raw / 255 : raw;
 
-    // Preserve fine hair and ear edges without making the background too noisy.
-    const feathered = Math.max(0, Math.min(1, (confidence - 0.06) / 0.52));
+    // Keep more hair and face-edge pixels.
+    const feathered = Math.max(0, Math.min(1, (confidence - 0.035) / 0.48));
     const alpha = Math.round(feathered * 255);
 
     imageData.data[i * 4] = 255;
@@ -141,20 +153,19 @@ function updateMask(mask) {
     imageData.data[i * 4 + 2] = 255;
     imageData.data[i * 4 + 3] = alpha;
 
-    if (confidence > 0.42) visiblePixels++;
+    if (confidence > 0.38) visiblePixels++;
   }
 
   maskCtx.putImageData(imageData, 0, 0);
   latestPersonMask = maskCanvas;
-  personSeen = visiblePixels > data.length * 0.02;
+  personSeen = visiblePixels > data.length * 0.018;
 }
 
 async function createSegmenter() {
-  const useSquareModel = isPortraitDevice();
-  const modelUrl = useSquareModel ? SQUARE_MODEL_URL : LANDSCAPE_MODEL_URL;
+  const modelUrl = isPortrait() ? PORTRAIT_MODEL_URL : LANDSCAPE_MODEL_URL;
 
   setLoading(
-    useSquareModel
+    isPortrait()
       ? "Loading the portrait selfie model…"
       : "Loading the landscape selfie model…"
   );
@@ -189,16 +200,13 @@ async function openCamera() {
 
   setLoading("Opening your camera…");
 
-  const portrait = isPortraitDevice();
-
   stream = await withTimeout(
     navigator.mediaDevices.getUserMedia({
       audio: false,
       video: {
         facingMode: { ideal: facingMode },
-        width: { ideal: portrait ? 720 : 960 },
-        height: { ideal: portrait ? 1280 : 540 },
-        aspectRatio: { ideal: portrait ? 9 / 16 : 16 / 9 }
+        width: { ideal: 960 },
+        height: { ideal: 1280 }
       }
     }),
     20000,
@@ -244,15 +252,16 @@ async function startExperience() {
 function drawPerson() {
   const width = personCanvas.width;
   const height = personCanvas.height;
+  const mirror = facingMode === "user";
 
-  const videoCrop = coverRect(
+  // Critical phone fix: contain the whole camera frame instead of cropping its sides.
+  const fit = containRect(
     video.videoWidth,
     video.videoHeight,
     width,
-    height
+    height,
+    isPortrait() ? 0.94 : 1
   );
-
-  const mirror = facingMode === "user";
 
   personCtx.clearRect(0, 0, width, height);
   personCtx.save();
@@ -262,16 +271,12 @@ function drawPerson() {
     personCtx.scale(-1, 1);
   }
 
+  const videoDX = mirror ? width - fit.dx - fit.dw : fit.dx;
+
   personCtx.drawImage(
     video,
-    videoCrop.sx,
-    videoCrop.sy,
-    videoCrop.sw,
-    videoCrop.sh,
-    0,
-    0,
-    width,
-    height
+    0, 0, video.videoWidth, video.videoHeight,
+    videoDX, fit.dy, fit.dw, fit.dh
   );
 
   personCtx.restore();
@@ -281,16 +286,6 @@ function drawPerson() {
     return;
   }
 
-  const normX = videoCrop.sx / video.videoWidth;
-  const normY = videoCrop.sy / video.videoHeight;
-  const normW = videoCrop.sw / video.videoWidth;
-  const normH = videoCrop.sh / video.videoHeight;
-
-  const maskSX = normX * latestPersonMask.width;
-  const maskSY = normY * latestPersonMask.height;
-  const maskSW = normW * latestPersonMask.width;
-  const maskSH = normH * latestPersonMask.height;
-
   personCtx.globalCompositeOperation = "destination-in";
   personCtx.save();
 
@@ -299,20 +294,15 @@ function drawPerson() {
     personCtx.scale(-1, 1);
   }
 
+  const maskDX = mirror ? width - fit.dx - fit.dw : fit.dx;
+
   personCtx.imageSmoothingEnabled = true;
-  personCtx.filter = "blur(1px)";
   personCtx.drawImage(
     latestPersonMask,
-    maskSX,
-    maskSY,
-    maskSW,
-    maskSH,
-    0,
-    0,
-    width,
-    height
+    0, 0, latestPersonMask.width, latestPersonMask.height,
+    maskDX, fit.dy, fit.dw, fit.dh
   );
-  personCtx.filter = "none";
+
   personCtx.restore();
   personCtx.globalCompositeOperation = "source-over";
 }
